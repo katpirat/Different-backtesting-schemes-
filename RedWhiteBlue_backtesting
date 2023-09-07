@@ -1,0 +1,134 @@
+# Nessesary module loads # 
+
+from abc import ABCMeta, abstractmethod
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from pandas_datareader import data
+import matplotlib.pyplot as plt
+
+### Abstrat clases to force the backtesting strategy classes to have certain methods, 
+
+class Strategy(object):
+    """Strategy is an abstract base class providing an interface for
+    all subsequent (inherited) trading strategies.
+
+    The goal of a (derived) Strategy object is to output a list of signals,
+    which has the form of a time series indexed pandas DataFrame.
+
+    In this instance only a single symbol/instrument is supported."""
+
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def generate_signals(self):
+        raise NotImplementedError("Should implement generate_signals()!")
+
+
+class Portfolio(object):
+    __metaclass__ = ABCMeta
+
+    @abstractmethod
+    def generate_positions(self):
+        raise NotImplementedError("Should implement generate_positions()!")
+
+    @abstractmethod
+    def backtest_portfolio(self):
+        raise NotImplementedError("Should implement backtest_portfolio()!")
+
+
+class MovingAverageCrossStrategy(Strategy):
+    def __init__(self, symbol, bars, short_window = 10, long_window = 100):
+        self.symbol = symbol
+        self.bars = bars
+        self.short_window = short_window
+        self.long_window = long_window
+
+    def generate_signals(self):
+        signals = pd.DataFrame(index = self.bars.index)
+
+        signals['signal'] = 0.0
+
+        signals['long_mvav'] = self.bars[self.symbol].rolling(window = self.long_window, min_periods = 1).mean()
+        signals['short_mvav'] = self.bars[self.symbol].rolling(window = self.short_window, min_periods = 1).mean()
+
+
+        signals['signal'][self.short_window: ] = (np.where(signals['short_mvav'][self.short_window: ] > signals['long_mvav'][self.short_window: ], 1, 0))
+        signals['positions'] = signals['signal'].diff()
+        return signals
+
+
+class MarketOnClosePortfolio(Portfolio):
+    def __init__(self, symbol, bars, signals, initial_capital=100000.0):
+
+        self.symbol = symbol
+        self.bars = bars
+        self.signals = signals
+        self.initial_capital = initial_capital
+        self.positions = self.generate_positions()
+
+    def generate_positions(self):
+        positions = pd.DataFrame(index = self.signals.index).fillna(0.0)
+        positions[self.symbol] = 100 * self.signals['signal']
+        return positions
+
+    def backtest_portfolio(self):
+        portfolio = self.positions*pd.DataFrame(self.bars['Close'])
+        pos_diff = self.positions.diff()
+        portfolio['holdings'] = (self.positions*pd.DataFrame(self.bars['Close'])).sum(axis=1)
+        portfolio['cash'] = self.initial_capital - (pos_diff*pd.DataFrame(self.bars['Close'])).sum(axis=1).cumsum()
+        portfolio['total'] = portfolio['cash'] + portfolio['holdings']
+        portfolio['returns'] = portfolio['total'].pct_change()
+        return portfolio
+
+
+class final_backtest: 
+    def __init__(self, ticker_symbol, symbol = 'Close', short_window = 10, long_window = 100): 
+        self.data = yf.download(ticker_symbol, start = '1990-01-01', end = '2002-01-01')
+        self.symbol = symbol
+        self.short_window = short_window
+        self.long_window = long_window
+    
+    def run(self):
+        strat = MovingAverageCrossStrategy(symbol = self.symbol, bars = self.data, short_window=self.short_window, long_window = self.long_window)
+        signals = strat.generate_signals()
+
+        pf = MarketOnClosePortfolio(symbol = self.symbol, bars = self.data, signals = signals)
+        returns = pf.backtest_portfolio()
+
+        fig = plt.figure()
+        fig.patch.set_facecolor('white')     # Set the outer colour to white
+        ax1 = fig.add_subplot(211,  ylabel='Price in $')
+
+        self.data['Close'].plot(ax=ax1, color='r', lw=2.)
+        signals[['short_mvav', 'long_mvav']].plot(ax=ax1, lw=2.)
+
+            # Plot the "buy" trades against AAPL
+        ax1.plot(signals[signals.positions == 1.0].index,
+                    signals.short_mvav[signals.positions == 1.0],
+                    '^', markersize=10, color='m')
+
+            # Plot the "sell" trades against AAPL
+        ax1.plot(signals[signals.positions == -1.0].index,
+                    signals.short_mvav[signals.positions == -1.0],
+                    'v', markersize=10, color='k')
+
+        ax2 = fig.add_subplot(212, ylabel='Portfolio value in $')
+        returns['total'].plot(ax=ax2, lw=2.)
+
+            # Plot the "buy" and "sell" trades against the equity curve
+        ax2.plot(returns[signals.positions == 1.0].index,
+                    returns.total[signals.positions == 1.0],
+                    '^', markersize=10, color='m')
+        ax2.plot(returns[signals.positions == -1.0].index,
+                    returns.total[signals.positions == -1.0],
+                    'v', markersize=10, color='k')
+
+            # Plot the figure
+        fig.show()
+
+
+
+### Example run of the strategy on the apple stock with lookback windows of 10 and 100 days ### 
+test = final_backtest('AAPl', short_window=10, long_window = 100)
+test.run()
